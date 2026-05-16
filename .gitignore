@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+node_modules/
+frontend/build/
+.DS_Store
+Thumbs.db
+*.log
+skyfield-data/
+finals2000A.all
+de421.bsp
