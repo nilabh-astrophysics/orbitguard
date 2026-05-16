@@ -5,7 +5,7 @@ FastAPI backend serving pass windows + quality scores.
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import Optional
 import logging
 
@@ -26,7 +26,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten in production
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -35,14 +35,14 @@ app.add_middleware(
 # ── Models ────────────────────────────────────────────────────────────────────
 
 class TLERequest(BaseModel):
-    tle_line1: str = Field(..., description="TLE line 1")
-    tle_line2: str = Field(..., description="TLE line 2")
-    satellite_name: str = Field("UNKNOWN", description="Satellite name")
-    lat: float = Field(..., ge=-90, le=90, description="Ground station latitude")
-    lon: float = Field(..., ge=-180, le=180, description="Ground station longitude")
-    elevation_m: float = Field(0.0, description="Ground station elevation in meters")
-    min_elevation_deg: float = Field(10.0, ge=0, le=90, description="Minimum pass elevation angle")
-    hours_ahead: int = Field(48, ge=1, le=168, description="Forecast horizon in hours")
+    tle_line1: str
+    tle_line2: str
+    satellite_name: str = "UNKNOWN"
+    lat: float
+    lon: float
+    elevation_m: float = 0.0
+    min_elevation_deg: float = 10.0
+    hours_ahead: int = 48
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -74,11 +74,11 @@ def space_weather():
 @app.get("/passes/norad/{norad_id}", tags=["Passes"])
 def passes_by_norad(
     norad_id: int,
-    lat: float = Query(..., ge=-90, le=90, description="Ground station latitude"),
-    lon: float = Query(..., ge=-180, le=180, description="Ground station longitude"),
+    lat: float = Query(..., description="Ground station latitude"),
+    lon: float = Query(..., description="Ground station longitude"),
     elevation_m: float = Query(0.0, description="Ground station elevation (meters)"),
-    min_elevation_deg: float = Query(10.0, ge=0, le=90),
-    hours_ahead: int = Query(48, ge=1, le=168),
+    min_elevation_deg: float = Query(10.0),
+    hours_ahead: int = Query(48),
 ):
     """
     Fetch TLE from CelesTrak by NORAD ID, compute pass windows,
