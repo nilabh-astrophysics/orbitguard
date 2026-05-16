@@ -1,11 +1,9 @@
 """
 OrbitGuard API — Satellite Pass Quality Forecasting
-FastAPI backend serving pass windows + quality scores.
 """
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from typing import Optional
 import logging
 
@@ -20,8 +18,6 @@ app = FastAPI(
     title="OrbitGuard API",
     description="Satellite pass quality forecasting — orbital geometry + space weather scoring.",
     version="0.1.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
 )
 
 app.add_middleware(
@@ -32,49 +28,28 @@ app.add_middleware(
 )
 
 
-# ── Models ────────────────────────────────────────────────────────────────────
-
-class TLERequest(BaseModel):
-    tle_line1: str
-    tle_line2: str
-    satellite_name: str = "UNKNOWN"
-    lat: float
-    lon: float
-    elevation_m: float = 0.0
-    min_elevation_deg: float = 10.0
-    hours_ahead: int = 48
-
-    model_config = {"json_schema_extra": {"example": {
-        "tle_line1": "1 25544U 98067A   21275.56995718  .00002182  00000-0  47577-4 0  9998",
-        "tle_line2": "2 25544  51.6461 339.4628 0003904 258.4779 244.6167 15.48834113305133",
-        "satellite_name": "ISS (ZARYA)",
-        "lat": 19.07, "lon": 72.87,
-        "elevation_m": 0.0, "min_elevation_deg": 10.0, "hours_ahead": 48
-    }}}
-
-
 # ── Routes ────────────────────────────────────────────────────────────────────
 
-@app.get("/", tags=["Health"])
+@app.get("/")
 def root():
     return {"service": "OrbitGuard", "status": "online", "version": "0.1.0", "docs": "/docs"}
 
 
-@app.get("/health", tags=["Health"])
+@app.get("/health")
 def health():
     return {"status": "ok"}
 
 
-@app.get("/space-weather", tags=["Space Weather"])
+@app.get("/space-weather")
 def space_weather():
     return get_space_weather_snapshot()
 
 
-@app.get("/passes/norad/{norad_id}", tags=["Passes"])
+@app.get("/passes/norad/{norad_id}")
 def passes_by_norad(
     norad_id: int,
-    lat: float = Query(..., description="Ground station latitude"),
-    lon: float = Query(..., description="Ground station longitude"),
+    lat: float = Query(...),
+    lon: float = Query(...),
     elevation_m: float = Query(0.0),
     min_elevation_deg: float = Query(10.0),
     hours_ahead: int = Query(48),
@@ -96,30 +71,31 @@ def passes_by_norad(
     }
 
 
-@app.post("/passes/tle", tags=["Passes"])
-def passes_by_tle(body: TLERequest):
+@app.post("/passes/tle")
+async def passes_by_tle(body: dict):
     passes = compute_passes(
-        tle_name=body.satellite_name,
-        tle_line1=body.tle_line1,
-        tle_line2=body.tle_line2,
-        lat=body.lat, lon=body.lon,
-        elevation_m=body.elevation_m,
-        min_elevation_deg=body.min_elevation_deg,
-        hours_ahead=body.hours_ahead,
+        tle_name=body.get("satellite_name", "UNKNOWN"),
+        tle_line1=body["tle_line1"],
+        tle_line2=body["tle_line2"],
+        lat=body["lat"],
+        lon=body["lon"],
+        elevation_m=body.get("elevation_m", 0.0),
+        min_elevation_deg=body.get("min_elevation_deg", 10.0),
+        hours_ahead=body.get("hours_ahead", 48),
     )
     weather = get_space_weather_snapshot()
     scored_passes = score_pass_list(passes, weather)
     return {
-        "satellite_name": body.satellite_name,
-        "ground_station": {"lat": body.lat, "lon": body.lon, "elevation_m": body.elevation_m},
-        "forecast_hours": body.hours_ahead,
+        "satellite_name": body.get("satellite_name", "UNKNOWN"),
+        "ground_station": {"lat": body["lat"], "lon": body["lon"], "elevation_m": body.get("elevation_m", 0.0)},
+        "forecast_hours": body.get("hours_ahead", 48),
         "pass_count": len(scored_passes),
         "space_weather": weather,
         "passes": scored_passes,
     }
 
 
-@app.get("/satellites/popular", tags=["Satellites"])
+@app.get("/satellites/popular")
 def popular_satellites():
     return {"satellites": [
         {"name": "ISS (ZARYA)", "norad_id": 25544, "type": "Space Station"},
