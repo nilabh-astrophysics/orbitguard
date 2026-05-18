@@ -1,101 +1,69 @@
 """
-OrbitGuard Database — Supabase Postgres via asyncpg (sync wrapper)
-Works on Python 3.14 — no C extensions needed.
+OrbitGuard Database — Supabase REST API (no C extensions)
+Uses Supabase's PostgREST HTTP API — pure Python, works on any Python version.
+Falls back to SQLite if SUPABASE_URL not set.
 """
 
 import os
 import secrets
 import hashlib
 import logging
-import asyncio
+import requests as req
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
+# Supabase REST API — get from Supabase dashboard → Settings → API
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")      # e.g. https://xxxx.supabase.co
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")  # service_role key (not anon)
+
+DB_PATH = os.environ.get("DB_PATH", "./orbitguard.db")
 
 
-def _run(coro):
-    """Run async coroutine synchronously."""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(asyncio.run, coro)
-                return future.result()
-        return loop.run_until_complete(coro)
-    except RuntimeError:
-        return asyncio.run(coro)
+def _headers():
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
 
 
-async def _get_conn():
-    import asyncpg
-    # Convert postgres:// to postgresql:// if needed
-    url = DATABASE_URL.replace("postgres://", "postgresql://")
-    return await asyncpg.connect(url)
+def _use_supabase():
+    return bool(SUPABASE_URL and SUPABASE_KEY)
 
+
+def _sb(path):
+    return f"{SUPABASE_URL}/rest/v1{path}"
+
+
+# ── Init ──────────────────────────────────────────────────────────────────────
 
 def init_db():
-    if not DATABASE_URL:
+    if _use_supabase():
+        logger.info("Using Supabase REST API for storage")
+        # Tables must be created in Supabase dashboard SQL editor
+        # (Supabase REST API doesn't support CREATE TABLE)
+        _ensure_supabase_tables()
+    else:
         _init_sqlite()
-        return
-    _run(_init_postgres())
+        logger.info("Using SQLite for storage")
 
 
-async def _init_postgres():
-    conn = await _get_conn()
-    try:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS api_keys (
-                id SERIAL PRIMARY KEY,
-                key_hash TEXT UNIQUE NOT NULL,
-                key_prefix TEXT NOT NULL,
-                email TEXT NOT NULL,
-                name TEXT,
-                tier TEXT DEFAULT 'free',
-                requests_today INTEGER DEFAULT 0,
-                requests_total INTEGER DEFAULT 0,
-                last_used TEXT,
-                created_at TEXT NOT NULL
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS alert_subscriptions (
-                id SERIAL PRIMARY KEY,
-                api_key_hash TEXT NOT NULL,
-                email TEXT NOT NULL,
-                norad_id INTEGER NOT NULL,
-                satellite_name TEXT,
-                lat REAL NOT NULL,
-                lon REAL NOT NULL,
-                elevation_m REAL DEFAULT 0.0,
-                min_score INTEGER DEFAULT 60,
-                alert_hours_ahead INTEGER DEFAULT 2,
-                active INTEGER DEFAULT 1,
-                last_alerted TEXT,
-                created_at TEXT NOT NULL
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS alert_log (
-                id SERIAL PRIMARY KEY,
-                subscription_id INTEGER NOT NULL,
-                pass_aos TEXT NOT NULL,
-                score REAL NOT NULL,
-                grade TEXT NOT NULL,
-                sent_at TEXT NOT NULL
-            )
-        """)
-        logger.info("Postgres database initialized")
-    finally:
-        await conn.close()
+def _ensure_supabase_tables():
+    """Check tables exist by querying them. Log warning if missing."""
+    for table in ["api_keys", "alert_subscriptions", "alert_log"]:
+        try:
+            r = req.get(_sb(f"/{table}?limit=1"), headers=_headers(), timeout=5)
+            if r.status_code == 404:
+                logger.error(f"Table '{table}' missing in Supabase — create it via SQL editor")
+        except Exception as e:
+            logger.warning(f"Supabase table check failed: {e}")
 
 
 def _init_sqlite():
     import sqlite3
-    path = os.environ.get("DB_PATH", "./orbitguard.db")
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(DB_PATH)
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS api_keys (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -135,7 +103,6 @@ def _init_sqlite():
     """)
     conn.commit()
     conn.close()
-    logger.info("SQLite database initialized")
 
 
 # ── API Keys ──────────────────────────────────────────────────────────────────
@@ -150,31 +117,20 @@ def create_api_key(email: str, name: str = None, tier: str = "free") -> str:
     raw, key_hash = generate_api_key()
     prefix = raw[:10]
     now = datetime.now(timezone.utc).isoformat()
-    if DATABASE_URL:
-        _run(_create_api_key_pg(key_hash, prefix, email, name, tier, now))
+    record = {"key_hash": key_hash, "key_prefix": prefix, "email": email,
+              "name": name, "tier": tier, "created_at": now}
+    if _use_supabase():
+        r = req.post(_sb("/api_keys"), json=record, headers=_headers(), timeout=10)
+        if r.status_code not in (200, 201):
+            raise Exception(f"Supabase insert failed: {r.text}")
     else:
-        _create_api_key_sqlite(key_hash, prefix, email, name, tier, now)
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("INSERT INTO api_keys (key_hash,key_prefix,email,name,tier,created_at) VALUES (?,?,?,?,?,?)",
+                     (key_hash, prefix, email, name, tier, now))
+        conn.commit()
+        conn.close()
     return raw
-
-
-async def _create_api_key_pg(key_hash, prefix, email, name, tier, now):
-    conn = await _get_conn()
-    try:
-        await conn.execute(
-            "INSERT INTO api_keys (key_hash,key_prefix,email,name,tier,created_at) VALUES ($1,$2,$3,$4,$5,$6)",
-            key_hash, prefix, email, name, tier, now
-        )
-    finally:
-        await conn.close()
-
-
-def _create_api_key_sqlite(key_hash, prefix, email, name, tier, now):
-    import sqlite3
-    conn = sqlite3.connect(os.environ.get("DB_PATH", "./orbitguard.db"))
-    conn.execute("INSERT INTO api_keys (key_hash,key_prefix,email,name,tier,created_at) VALUES (?,?,?,?,?,?)",
-                 (key_hash, prefix, email, name, tier, now))
-    conn.commit()
-    conn.close()
 
 
 def validate_api_key(raw_key: str):
@@ -182,40 +138,31 @@ def validate_api_key(raw_key: str):
         return None
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
     now = datetime.now(timezone.utc).isoformat()
-    if DATABASE_URL:
-        return _run(_validate_api_key_pg(key_hash, now))
-    return _validate_api_key_sqlite(key_hash, now)
-
-
-async def _validate_api_key_pg(key_hash, now):
-    conn = await _get_conn()
-    try:
-        row = await conn.fetchrow("SELECT * FROM api_keys WHERE key_hash = $1", key_hash)
-        if not row:
+    if _use_supabase():
+        r = req.get(_sb(f"/api_keys?key_hash=eq.{key_hash}"), headers=_headers(), timeout=10)
+        if r.status_code != 200 or not r.json():
             return None
-        await conn.execute(
-            "UPDATE api_keys SET requests_today=requests_today+1, requests_total=requests_total+1, last_used=$1 WHERE key_hash=$2",
-            now, key_hash
-        )
-        return dict(row)
-    finally:
-        await conn.close()
-
-
-def _validate_api_key_sqlite(key_hash, now):
-    import sqlite3
-    conn = sqlite3.connect(os.environ.get("DB_PATH", "./orbitguard.db"))
-    conn.row_factory = sqlite3.Row
-    row = conn.execute("SELECT * FROM api_keys WHERE key_hash = ?", (key_hash,)).fetchone()
-    if not row:
+        record = r.json()[0]
+        req.patch(_sb(f"/api_keys?key_hash=eq.{key_hash}"),
+                  json={"requests_today": record["requests_today"] + 1,
+                        "requests_total": record["requests_total"] + 1,
+                        "last_used": now},
+                  headers=_headers(), timeout=10)
+        return record
+    else:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM api_keys WHERE key_hash=?", (key_hash,)).fetchone()
+        if not row:
+            conn.close()
+            return None
+        result = dict(row)
+        conn.execute("UPDATE api_keys SET requests_today=requests_today+1, requests_total=requests_total+1, last_used=? WHERE key_hash=?",
+                     (now, key_hash))
+        conn.commit()
         conn.close()
-        return None
-    conn.execute("UPDATE api_keys SET requests_today=requests_today+1, requests_total=requests_total+1, last_used=? WHERE key_hash=?",
-                 (now, key_hash))
-    conn.commit()
-    result = dict(row)
-    conn.close()
-    return result
+        return result
 
 
 def get_rate_limit(tier: str) -> int:
@@ -227,121 +174,72 @@ def get_rate_limit(tier: str) -> int:
 def create_subscription(api_key_hash, email, norad_id, satellite_name,
                          lat, lon, elevation_m=0.0, min_score=60, alert_hours_ahead=2):
     now = datetime.now(timezone.utc).isoformat()
-    if DATABASE_URL:
-        return _run(_create_sub_pg(api_key_hash, email, norad_id, satellite_name,
-                                    lat, lon, elevation_m, min_score, alert_hours_ahead, now))
-    return _create_sub_sqlite(api_key_hash, email, norad_id, satellite_name,
-                               lat, lon, elevation_m, min_score, alert_hours_ahead, now)
-
-
-async def _create_sub_pg(api_key_hash, email, norad_id, satellite_name,
-                          lat, lon, elevation_m, min_score, alert_hours_ahead, now):
-    conn = await _get_conn()
-    try:
-        row = await conn.fetchrow("""
-            INSERT INTO alert_subscriptions
+    record = {"api_key_hash": api_key_hash, "email": email, "norad_id": norad_id,
+              "satellite_name": satellite_name, "lat": lat, "lon": lon,
+              "elevation_m": elevation_m, "min_score": min_score,
+              "alert_hours_ahead": alert_hours_ahead, "created_at": now}
+    if _use_supabase():
+        r = req.post(_sb("/alert_subscriptions"), json=record, headers=_headers(), timeout=10)
+        if r.status_code in (200, 201):
+            return r.json()[0]["id"]
+        raise Exception(f"Supabase insert failed: {r.text}")
+    else:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.execute("""INSERT INTO alert_subscriptions
             (api_key_hash,email,norad_id,satellite_name,lat,lon,elevation_m,min_score,alert_hours_ahead,created_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id
-        """, api_key_hash, email, norad_id, satellite_name, lat, lon,
-             elevation_m, min_score, alert_hours_ahead, now)
-        return row["id"]
-    finally:
-        await conn.close()
-
-
-def _create_sub_sqlite(api_key_hash, email, norad_id, satellite_name,
-                        lat, lon, elevation_m, min_score, alert_hours_ahead, now):
-    import sqlite3
-    conn = sqlite3.connect(os.environ.get("DB_PATH", "./orbitguard.db"))
-    cur = conn.execute("""
-        INSERT INTO alert_subscriptions
-        (api_key_hash,email,norad_id,satellite_name,lat,lon,elevation_m,min_score,alert_hours_ahead,created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?)
-    """, (api_key_hash, email, norad_id, satellite_name, lat, lon,
-          elevation_m, min_score, alert_hours_ahead, now))
-    conn.commit()
-    sub_id = cur.lastrowid
-    conn.close()
-    return sub_id
+            VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (api_key_hash, email, norad_id, satellite_name, lat, lon,
+             elevation_m, min_score, alert_hours_ahead, now))
+        conn.commit()
+        sub_id = cur.lastrowid
+        conn.close()
+        return sub_id
 
 
 def get_active_subscriptions():
-    if DATABASE_URL:
-        return _run(_get_subs_pg())
-    return _get_subs_sqlite()
-
-
-async def _get_subs_pg():
-    conn = await _get_conn()
-    try:
-        rows = await conn.fetch("SELECT * FROM alert_subscriptions WHERE active = 1")
+    if _use_supabase():
+        r = req.get(_sb("/alert_subscriptions?active=eq.1"), headers=_headers(), timeout=10)
+        return r.json() if r.status_code == 200 else []
+    else:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM alert_subscriptions WHERE active=1").fetchall()
+        conn.close()
         return [dict(r) for r in rows]
-    finally:
-        await conn.close()
-
-
-def _get_subs_sqlite():
-    import sqlite3
-    conn = sqlite3.connect(os.environ.get("DB_PATH", "./orbitguard.db"))
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute("SELECT * FROM alert_subscriptions WHERE active = 1").fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
 
 
 def mark_alerted(subscription_id, pass_aos, score, grade):
     now = datetime.now(timezone.utc).isoformat()
-    if DATABASE_URL:
-        _run(_mark_alerted_pg(subscription_id, pass_aos, score, grade, now))
+    if _use_supabase():
+        req.patch(_sb(f"/alert_subscriptions?id=eq.{subscription_id}"),
+                  json={"last_alerted": now}, headers=_headers(), timeout=10)
+        req.post(_sb("/alert_log"),
+                 json={"subscription_id": subscription_id, "pass_aos": pass_aos,
+                       "score": score, "grade": grade, "sent_at": now},
+                 headers=_headers(), timeout=10)
     else:
-        _mark_alerted_sqlite(subscription_id, pass_aos, score, grade, now)
-
-
-async def _mark_alerted_pg(sub_id, pass_aos, score, grade, now):
-    conn = await _get_conn()
-    try:
-        await conn.execute("UPDATE alert_subscriptions SET last_alerted=$1 WHERE id=$2", now, sub_id)
-        await conn.execute("INSERT INTO alert_log (subscription_id,pass_aos,score,grade,sent_at) VALUES ($1,$2,$3,$4,$5)",
-                           sub_id, pass_aos, score, grade, now)
-    finally:
-        await conn.close()
-
-
-def _mark_alerted_sqlite(sub_id, pass_aos, score, grade, now):
-    import sqlite3
-    conn = sqlite3.connect(os.environ.get("DB_PATH", "./orbitguard.db"))
-    conn.execute("UPDATE alert_subscriptions SET last_alerted=? WHERE id=?", (now, sub_id))
-    conn.execute("INSERT INTO alert_log (subscription_id,pass_aos,score,grade,sent_at) VALUES (?,?,?,?,?)",
-                 (sub_id, pass_aos, score, grade, now))
-    conn.commit()
-    conn.close()
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("UPDATE alert_subscriptions SET last_alerted=? WHERE id=?", (now, subscription_id))
+        conn.execute("INSERT INTO alert_log (subscription_id,pass_aos,score,grade,sent_at) VALUES (?,?,?,?,?)",
+                     (subscription_id, pass_aos, score, grade, now))
+        conn.commit()
+        conn.close()
 
 
 def delete_subscription(subscription_id, api_key_hash):
-    if DATABASE_URL:
-        return _run(_delete_sub_pg(subscription_id, api_key_hash))
-    return _delete_sub_sqlite(subscription_id, api_key_hash)
-
-
-async def _delete_sub_pg(sub_id, api_key_hash):
-    conn = await _get_conn()
-    try:
-        result = await conn.execute(
-            "DELETE FROM alert_subscriptions WHERE id=$1 AND api_key_hash=$2", sub_id, api_key_hash)
-        return result != "DELETE 0"
-    finally:
-        await conn.close()
-
-
-def _delete_sub_sqlite(sub_id, api_key_hash):
-    import sqlite3
-    conn = sqlite3.connect(os.environ.get("DB_PATH", "./orbitguard.db"))
-    cur = conn.execute("DELETE FROM alert_subscriptions WHERE id=? AND api_key_hash=?", (sub_id, api_key_hash))
-    conn.commit()
-    deleted = cur.rowcount > 0
-    conn.close()
-    return deleted
-
-
-def get_conn_for_admin():
-    return DATABASE_URL
+    if _use_supabase():
+        r = req.delete(_sb(f"/alert_subscriptions?id=eq.{subscription_id}&api_key_hash=eq.{api_key_hash}"),
+                       headers=_headers(), timeout=10)
+        return r.status_code in (200, 204)
+    else:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.execute("DELETE FROM alert_subscriptions WHERE id=? AND api_key_hash=?",
+                           (subscription_id, api_key_hash))
+        conn.commit()
+        deleted = cur.rowcount > 0
+        conn.close()
+        return deleted
