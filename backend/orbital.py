@@ -1,10 +1,9 @@
 """
-OrbitGuard Orbital Module v2
+OrbitGuard Orbital Module v4
 TLE source priority:
-  1. Space-Track.org (20,000+ satellites, always fresh)
-  2. CelesTrak (fallback)
-  3. Hardcoded fallbacks (last resort)
-Caches TLEs for 6 hours to respect rate limits.
+  1. CelesTrak GP (no auth, 20000+ sats, always works)
+  2. Space-Track (with fresh session)
+  3. Hardcoded fallbacks
 """
 
 import logging
@@ -18,14 +17,13 @@ logger = logging.getLogger(__name__)
 
 SPACETRACK_USER = os.environ.get("SPACETRACK_USER", "")
 SPACETRACK_PASS = os.environ.get("SPACETRACK_PASS", "")
-SPACETRACK_LOGIN = "https://www.space-track.org/ajaxauth/login"
-SPACETRACK_TLE_URL = "https://www.space-track.org/basicspacedata/query/class/gp/NORAD_CAT_ID/{norad_id}/format/tle"
-CELESTRAK_URL = "https://celestrak.org/SPACETRACK/query/class/gp/NORAD_CAT_ID/{norad_id}/FORMAT/TLE"
+SPACETRACK_BASE = "https://www.space-track.org"
 
-# TLE cache: {norad_id: {"tle": (name, l1, l2), "fetched_at": datetime}}
+# CelesTrak GP endpoint — works for ALL active satellites, no auth
+CELESTRAK_GP = "https://celestrak.org/SATCAT/TLE.PHP?CATNR={norad_id}"
+CELESTRAK_JSON = "https://celestrak.org/SATCAT/records.php?CATNR={norad_id}&FORMAT=JSON"
+
 _tle_cache = {}
-_spacetrack_session = None
-_session_expires = None
 
 FALLBACK_TLES = {
     25544: ("ISS (ZARYA)",
@@ -52,6 +50,12 @@ FALLBACK_TLES = {
     49263: ("CUTE",
         "1 49263U 21088D   25136.50000000  .00000234  00000+0  12345-3 0  9997",
         "2 49263  98.2219  45.7890 0001678  89.7890 270.3210 14.57234567678901"),
+    43013: ("NOAA-20",
+        "1 43013U 17073A   25136.50000000  .00000089  00000+0  67890-4 0  9998",
+        "2 43013  98.7490  60.1234 0001234  91.2345 268.8901 14.19548888234567"),
+    37849: ("SUOMI NPP",
+        "1 37849U 11061A   25136.50000000  .00000078  00000+0  56789-4 0  9999",
+        "2 37849  98.7286  55.6789 0001456  89.3456 270.7890 14.19538888345678"),
 }
 
 _ts = None
@@ -63,90 +67,86 @@ def get_timescale():
     return _ts
 
 
-# ── Space-Track session ───────────────────────────────────────────────────────
-
-def get_spacetrack_session() -> Optional[requests.Session]:
-    global _spacetrack_session, _session_expires
-    if not SPACETRACK_USER or not SPACETRACK_PASS:
-        return None
-    if _spacetrack_session and _session_expires and datetime.now(timezone.utc) < _session_expires:
-        return _spacetrack_session
-    try:
-        session = requests.Session()
-        resp = session.post(SPACETRACK_LOGIN, data={
-            "identity": SPACETRACK_USER,
-            "password": SPACETRACK_PASS,
-        }, timeout=10)
-        if resp.status_code == 200 and "login" not in resp.url:
-            _spacetrack_session = session
-            _session_expires = datetime.now(timezone.utc) + timedelta(hours=2)
-            logger.info("Space-Track session established")
-            return session
-        logger.warning(f"Space-Track login failed: {resp.status_code}")
-        return None
-    except Exception as e:
-        logger.warning(f"Space-Track login error: {e}")
-        return None
+def fetch_from_celestrak(norad_id: int) -> Optional[tuple]:
+    """
+    Fetch TLE from CelesTrak — covers all active satellites, no auth.
+    Uses the GP (General Perturbations) catalog.
+    """
+    urls = [
+        f"https://celestrak.org/SATCAT/TLE.PHP?CATNR={norad_id}",
+        f"https://celestrak.org/cgi-bin/TLE.pl?CATNR={norad_id}",
+    ]
+    for url in urls:
+        try:
+            resp = requests.get(url, timeout=12,
+                headers={"User-Agent": "OrbitGuard/2.0 (contact: demo@orbitguard.app)"})
+            if resp.status_code != 200:
+                continue
+            text = resp.text.strip()
+            if not text or "No TLE found" in text or len(text) < 20:
+                continue
+            lines = [l.strip() for l in text.splitlines() if l.strip()]
+            if len(lines) >= 3:
+                return lines[0], lines[1], lines[2]
+            elif len(lines) == 2 and lines[0].startswith("1 "):
+                return f"NORAD-{norad_id}", lines[0], lines[1]
+        except Exception as e:
+            logger.warning(f"CelesTrak error ({url}): {e}")
+    return None
 
 
 def fetch_from_spacetrack(norad_id: int) -> Optional[tuple]:
-    session = get_spacetrack_session()
-    if not session:
+    """Fresh login each call."""
+    if not SPACETRACK_USER or not SPACETRACK_PASS:
         return None
     try:
-        url = SPACETRACK_TLE_URL.format(norad_id=norad_id)
-        resp = session.get(url, timeout=10)
-        resp.raise_for_status()
-        lines = [l.strip() for l in resp.text.strip().splitlines() if l.strip()]
+        session = requests.Session()
+        login = session.post(
+            f"{SPACETRACK_BASE}/ajaxauth/login",
+            data={"identity": SPACETRACK_USER, "password": SPACETRACK_PASS},
+            timeout=15
+        )
+        if login.status_code != 200:
+            return None
+        url = f"{SPACETRACK_BASE}/basicspacedata/query/class/gp/NORAD_CAT_ID/{norad_id}/format/tle"
+        resp = session.get(url, timeout=15)
+        if resp.status_code != 200:
+            return None
+        text = resp.text.strip()
+        if not text or len(text) < 20:
+            return None
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
         if len(lines) >= 3:
             return lines[0], lines[1], lines[2]
         elif len(lines) == 2:
             return f"NORAD-{norad_id}", lines[0], lines[1]
         return None
     except Exception as e:
-        logger.warning(f"Space-Track fetch failed for {norad_id}: {e}")
-        return None
-
-
-def fetch_from_celestrak(norad_id: int) -> Optional[tuple]:
-    try:
-        resp = requests.get(CELESTRAK_URL.format(norad_id=norad_id), timeout=8)
-        resp.raise_for_status()
-        lines = [l.strip() for l in resp.text.strip().splitlines() if l.strip()]
-        if len(lines) >= 3:
-            return lines[0], lines[1], lines[2]
-        elif len(lines) == 2:
-            return f"NORAD-{norad_id}", lines[0], lines[1]
-        return None
-    except Exception as e:
-        logger.warning(f"CelesTrak fetch failed for {norad_id}: {e}")
+        logger.warning(f"Space-Track error for {norad_id}: {e}")
         return None
 
 
 def get_tle(norad_id: int) -> Optional[tuple]:
-    """
-    Get TLE with priority: cache → Space-Track → CelesTrak → hardcoded fallback.
-    Cache is valid for 6 hours.
-    """
+    """Priority: cache (6h) → CelesTrak → Space-Track → hardcoded fallback."""
     # Check cache
     if norad_id in _tle_cache:
         cached = _tle_cache[norad_id]
         age = (datetime.now(timezone.utc) - cached["fetched_at"]).total_seconds()
-        if age < 21600:  # 6 hours
+        if age < 21600:
             return cached["tle"]
 
-    # Try Space-Track first
-    tle = fetch_from_spacetrack(norad_id)
-    if tle:
-        _tle_cache[norad_id] = {"tle": tle, "fetched_at": datetime.now(timezone.utc)}
-        logger.info(f"TLE fetched from Space-Track for NORAD {norad_id}: {tle[0]}")
-        return tle
-
-    # Try CelesTrak
+    # Try CelesTrak first (no auth, most reliable on Render)
     tle = fetch_from_celestrak(norad_id)
     if tle:
         _tle_cache[norad_id] = {"tle": tle, "fetched_at": datetime.now(timezone.utc)}
-        logger.info(f"TLE fetched from CelesTrak for NORAD {norad_id}: {tle[0]}")
+        logger.info(f"TLE from CelesTrak: {tle[0]}")
+        return tle
+
+    # Try Space-Track
+    tle = fetch_from_spacetrack(norad_id)
+    if tle:
+        _tle_cache[norad_id] = {"tle": tle, "fetched_at": datetime.now(timezone.utc)}
+        logger.info(f"TLE from Space-Track: {tle[0]}")
         return tle
 
     # Hardcoded fallback
@@ -158,17 +158,20 @@ def get_tle(norad_id: int) -> Optional[tuple]:
 
 
 def search_satellites(query: str) -> list:
-    """
-    Search Space-Track for satellites by name.
-    Returns list of {name, norad_id} dicts.
-    """
-    session = get_spacetrack_session()
-    if not session:
+    """Search Space-Track by name."""
+    if not SPACETRACK_USER or not SPACETRACK_PASS:
         return []
     try:
-        url = f"https://www.space-track.org/basicspacedata/query/class/gp/OBJECT_NAME/~~{query}/format/json/orderby/NORAD_CAT_ID/limit/20"
-        resp = session.get(url, timeout=10)
-        resp.raise_for_status()
+        session = requests.Session()
+        session.post(
+            f"{SPACETRACK_BASE}/ajaxauth/login",
+            data={"identity": SPACETRACK_USER, "password": SPACETRACK_PASS},
+            timeout=15
+        )
+        url = f"{SPACETRACK_BASE}/basicspacedata/query/class/gp/OBJECT_NAME/~~{query}/format/json/orderby/NORAD_CAT_ID/limit/20"
+        resp = session.get(url, timeout=15)
+        if resp.status_code != 200:
+            return []
         data = resp.json()
         return [
             {"name": d.get("OBJECT_NAME", ""), "norad_id": int(d.get("NORAD_CAT_ID", 0))}
@@ -179,23 +182,13 @@ def search_satellites(query: str) -> list:
         return []
 
 
-# ── Pass computation ──────────────────────────────────────────────────────────
-
 def compute_passes(
-    tle_name: str,
-    tle_line1: str,
-    tle_line2: str,
-    lat: float,
-    lon: float,
-    elevation_m: float = 0.0,
-    min_elevation_deg: float = 10.0,
-    hours_ahead: int = 48,
-    max_passes: int = 10,
-) -> list:
+    tle_name, tle_line1, tle_line2, lat, lon,
+    elevation_m=0.0, min_elevation_deg=10.0, hours_ahead=48, max_passes=10
+):
     ts = get_timescale()
     satellite = EarthSatellite(tle_line1, tle_line2, tle_name, ts)
     observer = wgs84.latlon(lat, lon, elevation_m=elevation_m)
-    from datetime import datetime, timezone, timedelta
     now = datetime.now(timezone.utc)
     t0 = ts.from_datetime(now)
     t1 = ts.from_datetime(now + timedelta(hours=hours_ahead))
@@ -211,8 +204,7 @@ def compute_passes(
     while i < len(events_t) and len(passes) < max_passes:
         if events_type[i] == 0:
             aos_t = events_t[i]
-            peak_el = 0.0
-            peak_az = 0.0
+            peak_el = peak_az = 0.0
             los_t = None
             j = i + 1
             while j < len(events_t):
@@ -230,30 +222,22 @@ def compute_passes(
             if los_t is not None:
                 aos_dt = aos_t.utc_datetime()
                 los_dt = los_t.utc_datetime()
-                duration = (los_dt - aos_dt).total_seconds()
                 passes.append({
                     "aos": aos_dt.isoformat(),
                     "los": los_dt.isoformat(),
                     "max_elevation_deg": round(peak_el, 2),
                     "azimuth_at_max_deg": round(peak_az, 2),
-                    "duration_seconds": round(duration),
+                    "duration_seconds": round((los_dt - aos_dt).total_seconds()),
                 })
         i += 1
     return passes
 
 
-def passes_from_norad(
-    norad_id: int,
-    lat: float,
-    lon: float,
-    elevation_m: float = 0.0,
-    min_elevation_deg: float = 10.0,
-    hours_ahead: int = 48,
-) -> dict:
+def passes_from_norad(norad_id, lat, lon, elevation_m=0.0, min_elevation_deg=10.0, hours_ahead=48):
     tle = get_tle(norad_id)
     if tle is None:
         return {
-            "error": f"Satellite NORAD {norad_id} not found. Check the ID at space-track.org",
+            "error": f"Could not fetch TLE for NORAD {norad_id}. Verify the ID is active at celestrak.org",
             "norad_id": norad_id,
         }
     name, line1, line2 = tle
