@@ -374,11 +374,21 @@ function Dashboard({ user, apiKey, onLogout }) {
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           {wx && (
-            <span style={{ fontSize: 11, padding: "3px 8px", borderRadius: 6, fontWeight: 500,
-              background: wx.severity === "SEVERE" ? "#FCEBEB" : wx.severity === "MODERATE" ? "#FAEEDA" : "#E1F5EE",
-              color: wx.severity === "SEVERE" ? "#501313" : wx.severity === "MODERATE" ? "#633806" : "#085041" }}>
-              {wx.severity}
-            </span>
+            <div style={{ position: "relative", display: "inline-block" }}
+              onMouseEnter={e => e.currentTarget.querySelector(".wx-tooltip").style.display="block"}
+              onMouseLeave={e => e.currentTarget.querySelector(".wx-tooltip").style.display="none"}>
+              <span style={{ fontSize: 11, padding: "3px 8px", borderRadius: 6, fontWeight: 500, cursor: "help",
+                background: wx.severity === "SEVERE" ? "#FCEBEB" : wx.severity === "MODERATE" ? "#FAEEDA" : wx.severity === "MINOR" ? "#FFF8E7" : "#E1F5EE",
+                color: wx.severity === "SEVERE" ? "#501313" : wx.severity === "MODERATE" ? "#633806" : wx.severity === "MINOR" ? "#7A5200" : "#085041" }}>
+                {wx.severity} {wx.g_scale && }
+              </span>
+              <div className="wx-tooltip" style={{ display: "none", position: "absolute", right: 0, top: "calc(100% + 6px)",
+                background: "#1a1a1a", color: "#fff", fontSize: 12, padding: "8px 12px", borderRadius: 8,
+                width: 260, zIndex: 999, lineHeight: 1.5, whiteSpace: "normal" }}>
+                <div style={{ fontWeight: 500, marginBottom: 4 }}>{wx.severity} — {wx.g_scale || "G0"}</div>
+                <div style={{ color: "#ccc" }}>{wx.ops_impact || "Space weather conditions nominal."}</div>
+              </div>
+            </div>
           )}
           <StationManager userId={user.id} onSelect={handleStationSelect}
             currentLat={lat} currentLon={lon} />
