@@ -1,7 +1,7 @@
 """
-OrbitGuard Database — Supabase REST API (no C extensions)
-Uses Supabase's PostgREST HTTP API — pure Python, works on any Python version.
-Falls back to SQLite if SUPABASE_URL not set.
+OrbitGuard Database v2 — Supabase REST API
+- Daily request counter auto-resets at UTC midnight
+- Upgrade flow support
 """
 
 import os
@@ -9,14 +9,12 @@ import secrets
 import hashlib
 import logging
 import requests as req
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 
 logger = logging.getLogger(__name__)
 
-# Supabase REST API — get from Supabase dashboard → Settings → API
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")      # e.g. https://xxxx.supabase.co
-SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")  # service_role key (not anon)
-
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 DB_PATH = os.environ.get("DB_PATH", "./orbitguard.db")
 
 
@@ -37,13 +35,9 @@ def _sb(path):
     return f"{SUPABASE_URL}/rest/v1{path}"
 
 
-# ── Init ──────────────────────────────────────────────────────────────────────
-
 def init_db():
     if _use_supabase():
         logger.info("Using Supabase REST API for storage")
-        # Tables must be created in Supabase dashboard SQL editor
-        # (Supabase REST API doesn't support CREATE TABLE)
         _ensure_supabase_tables()
     else:
         _init_sqlite()
@@ -51,12 +45,11 @@ def init_db():
 
 
 def _ensure_supabase_tables():
-    """Check tables exist by querying them. Log warning if missing."""
     for table in ["api_keys", "alert_subscriptions", "alert_log"]:
         try:
             r = req.get(_sb(f"/{table}?limit=1"), headers=_headers(), timeout=5)
             if r.status_code == 404:
-                logger.error(f"Table '{table}' missing in Supabase — create it via SQL editor")
+                logger.error(f"Table '{table}' missing in Supabase")
         except Exception as e:
             logger.warning(f"Supabase table check failed: {e}")
 
@@ -75,6 +68,7 @@ def _init_sqlite():
             requests_today INTEGER DEFAULT 0,
             requests_total INTEGER DEFAULT 0,
             last_used TEXT,
+            last_reset_date TEXT,
             created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS alert_subscriptions (
@@ -105,8 +99,6 @@ def _init_sqlite():
     conn.close()
 
 
-# ── API Keys ──────────────────────────────────────────────────────────────────
-
 def generate_api_key():
     raw = "og_" + secrets.token_urlsafe(32)
     key_hash = hashlib.sha256(raw.encode()).hexdigest()
@@ -117,8 +109,12 @@ def create_api_key(email: str, name: str = None, tier: str = "free") -> str:
     raw, key_hash = generate_api_key()
     prefix = raw[:10]
     now = datetime.now(timezone.utc).isoformat()
-    record = {"key_hash": key_hash, "key_prefix": prefix, "email": email,
-              "name": name, "tier": tier, "created_at": now}
+    today = date.today().isoformat()
+    record = {
+        "key_hash": key_hash, "key_prefix": prefix, "email": email,
+        "name": name, "tier": tier, "created_at": now,
+        "last_reset_date": today, "requests_today": 0, "requests_total": 0,
+    }
     if _use_supabase():
         r = req.post(_sb("/api_keys"), json=record, headers=_headers(), timeout=10)
         if r.status_code not in (200, 201):
@@ -126,8 +122,10 @@ def create_api_key(email: str, name: str = None, tier: str = "free") -> str:
     else:
         import sqlite3
         conn = sqlite3.connect(DB_PATH)
-        conn.execute("INSERT INTO api_keys (key_hash,key_prefix,email,name,tier,created_at) VALUES (?,?,?,?,?,?)",
-                     (key_hash, prefix, email, name, tier, now))
+        conn.execute(
+            "INSERT INTO api_keys (key_hash,key_prefix,email,name,tier,created_at,last_reset_date) VALUES (?,?,?,?,?,?,?)",
+            (key_hash, prefix, email, name, tier, now, today)
+        )
         conn.commit()
         conn.close()
     return raw
@@ -138,16 +136,29 @@ def validate_api_key(raw_key: str):
         return None
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
     now = datetime.now(timezone.utc).isoformat()
+    today = date.today().isoformat()
+
     if _use_supabase():
         r = req.get(_sb(f"/api_keys?key_hash=eq.{key_hash}"), headers=_headers(), timeout=10)
         if r.status_code != 200 or not r.json():
             return None
         record = r.json()[0]
-        req.patch(_sb(f"/api_keys?key_hash=eq.{key_hash}"),
-                  json={"requests_today": record["requests_today"] + 1,
-                        "requests_total": record["requests_total"] + 1,
-                        "last_used": now},
-                  headers=_headers(), timeout=10)
+
+        # Reset daily counter if it's a new day
+        needs_reset = record.get("last_reset_date") != today
+        update = {
+            "requests_today": 1 if needs_reset else record["requests_today"] + 1,
+            "requests_total": record["requests_total"] + 1,
+            "last_used": now,
+        }
+        if needs_reset:
+            update["last_reset_date"] = today
+
+        req.patch(
+            _sb(f"/api_keys?key_hash=eq.{key_hash}"),
+            json=update, headers=_headers(), timeout=10
+        )
+        record.update(update)
         return record
     else:
         import sqlite3
@@ -158,26 +169,53 @@ def validate_api_key(raw_key: str):
             conn.close()
             return None
         result = dict(row)
-        conn.execute("UPDATE api_keys SET requests_today=requests_today+1, requests_total=requests_total+1, last_used=? WHERE key_hash=?",
-                     (now, key_hash))
+
+        needs_reset = result.get("last_reset_date") != today
+        new_today = 1 if needs_reset else result["requests_today"] + 1
+
+        conn.execute(
+            "UPDATE api_keys SET requests_today=?, requests_total=requests_total+1, last_used=?, last_reset_date=? WHERE key_hash=?",
+            (new_today, now, today, key_hash)
+        )
         conn.commit()
         conn.close()
+        result["requests_today"] = new_today
         return result
 
 
 def get_rate_limit(tier: str) -> int:
-    return {"free": 50, "hobbyist": 500, "commercial": 5000}.get(tier, 50)
+    return {"free": 100, "hobbyist": 1000, "commercial": 10000}.get(tier, 100)
 
 
-# ── Subscriptions ─────────────────────────────────────────────────────────────
+def upgrade_api_key(raw_key: str, new_tier: str) -> bool:
+    """Upgrade a key's tier. Called by admin endpoint."""
+    if not raw_key.startswith("og_"):
+        return False
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    if _use_supabase():
+        r = req.patch(
+            _sb(f"/api_keys?key_hash=eq.{key_hash}"),
+            json={"tier": new_tier}, headers=_headers(), timeout=10
+        )
+        return r.status_code in (200, 204)
+    else:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.execute("UPDATE api_keys SET tier=? WHERE key_hash=?", (new_tier, key_hash))
+        conn.commit()
+        conn.close()
+        return cur.rowcount > 0
+
 
 def create_subscription(api_key_hash, email, norad_id, satellite_name,
                          lat, lon, elevation_m=0.0, min_score=60, alert_hours_ahead=2):
     now = datetime.now(timezone.utc).isoformat()
-    record = {"api_key_hash": api_key_hash, "email": email, "norad_id": norad_id,
-              "satellite_name": satellite_name, "lat": lat, "lon": lon,
-              "elevation_m": elevation_m, "min_score": min_score,
-              "alert_hours_ahead": alert_hours_ahead, "created_at": now}
+    record = {
+        "api_key_hash": api_key_hash, "email": email, "norad_id": norad_id,
+        "satellite_name": satellite_name, "lat": lat, "lon": lon,
+        "elevation_m": elevation_m, "min_score": min_score,
+        "alert_hours_ahead": alert_hours_ahead, "created_at": now,
+    }
     if _use_supabase():
         r = req.post(_sb("/alert_subscriptions"), json=record, headers=_headers(), timeout=10)
         if r.status_code in (200, 201):
@@ -186,7 +224,8 @@ def create_subscription(api_key_hash, email, norad_id, satellite_name,
     else:
         import sqlite3
         conn = sqlite3.connect(DB_PATH)
-        cur = conn.execute("""INSERT INTO alert_subscriptions
+        cur = conn.execute("""
+            INSERT INTO alert_subscriptions
             (api_key_hash,email,norad_id,satellite_name,lat,lon,elevation_m,min_score,alert_hours_ahead,created_at)
             VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (api_key_hash, email, norad_id, satellite_name, lat, lon,
@@ -231,8 +270,10 @@ def mark_alerted(subscription_id, pass_aos, score, grade):
 
 def delete_subscription(subscription_id, api_key_hash):
     if _use_supabase():
-        r = req.delete(_sb(f"/alert_subscriptions?id=eq.{subscription_id}&api_key_hash=eq.{api_key_hash}"),
-                       headers=_headers(), timeout=10)
+        r = req.delete(
+            _sb(f"/alert_subscriptions?id=eq.{subscription_id}&api_key_hash=eq.{api_key_hash}"),
+            headers=_headers(), timeout=10
+        )
         return r.status_code in (200, 204)
     else:
         import sqlite3
@@ -240,6 +281,5 @@ def delete_subscription(subscription_id, api_key_hash):
         cur = conn.execute("DELETE FROM alert_subscriptions WHERE id=? AND api_key_hash=?",
                            (subscription_id, api_key_hash))
         conn.commit()
-        deleted = cur.rowcount > 0
         conn.close()
-        return deleted
+        return cur.rowcount > 0
