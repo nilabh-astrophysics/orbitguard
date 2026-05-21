@@ -380,7 +380,7 @@ function Dashboard({ user, apiKey, onLogout }) {
               <span style={{ fontSize: 11, padding: "3px 8px", borderRadius: 6, fontWeight: 500, cursor: "help",
                 background: wx.severity === "SEVERE" ? "#FCEBEB" : wx.severity === "MODERATE" ? "#FAEEDA" : wx.severity === "MINOR" ? "#FFF8E7" : "#E1F5EE",
                 color: wx.severity === "SEVERE" ? "#501313" : wx.severity === "MODERATE" ? "#633806" : wx.severity === "MINOR" ? "#7A5200" : "#085041" }}>
-                {wx.severity} {wx.g_scale && }
+                {wx.severity} {wx.g_scale && `(${wx.g_scale})`}
               </span>
               <div className="wx-tooltip" style={{ display: "none", position: "absolute", right: 0, top: "calc(100% + 6px)",
                 background: "#1a1a1a", color: "#fff", fontSize: 12, padding: "8px 12px", borderRadius: 8,
