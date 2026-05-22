@@ -58,8 +58,8 @@ function ScoreRing({ score }) {
 
 function PassCard({ pass }) {
   const aos = new Date(pass.aos);
-  const timeStr = aos.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
-  const dateStr = aos.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  const timeStr = aos.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false });
+  const dateStr = aos.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   const mins = Math.floor(pass.duration_seconds / 60), secs = pass.duration_seconds % 60;
   const { score, grade } = pass.quality;
   const gs = gradeStyle(grade);
@@ -356,7 +356,7 @@ function Dashboard({ user, apiKey, onLogout }) {
   const bestScore = scores.length ? Math.max(...scores) : null;
   const avoidCount = scores.filter(s => s < 20).length;
   const chartData = passes.map(p => ({
-    time: new Date(p.aos).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false }),
+    time: new Date(p.aos).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false }),
     score: parseFloat(p.quality.score.toFixed(1)),
   }));
 
@@ -524,8 +524,10 @@ function Dashboard({ user, apiKey, onLogout }) {
       {/* Chart */}
       {chartData.length > 0 && (
         <div style={{ marginBottom: "1rem" }}>
-          <div style={{ fontSize: 13, fontWeight: 500, color: "#888", textTransform: "uppercase",
-            letterSpacing: "0.06em", marginBottom: "0.6rem" }}>Pass quality timeline</div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.6rem" }}>
+          <div style={{ fontSize: 13, fontWeight: 500, color: "#888", textTransform: "uppercase", letterSpacing: "0.06em" }}>Pass quality timeline</div>
+          <div style={{ fontSize: 11, color: "#aaa" }}>Times in your local timezone ({Intl.DateTimeFormat().resolvedOptions().timeZone})</div>
+        </div>
           <ResponsiveContainer width="100%" height={160}>
             <BarChart data={chartData} margin={{ top: 4, right: 4, bottom: 4, left: -20 }}>
               <XAxis dataKey="time" tick={{ fontSize: 11, fill: "#888" }} axisLine={false} tickLine={false} />
