@@ -184,7 +184,8 @@ function PassCard({ pass, noradId, satName, lat, lon, apiKey, existingAlerts, on
   return (
     <div style={{ background: "#fff", border: "0.5px solid #e0e0e0", borderRadius: 12,
       padding: "0.9rem 1.1rem", display: "grid",
-      gridTemplateColumns: "52px 1fr 1fr 1fr 80px 90px", gap: 10, alignItems: "center" }}>
+      gridTemplateColumns: "52px 1fr 1fr 1fr 80px 90px", gap: 10, alignItems: "center",
+      borderLeft: `3px solid ${scoreColor(score)}` }}>
       <ScoreRing score={score} />
       <div>
         <div style={{ fontSize: 14, fontWeight: 500 }}>{timeStr}</div>
@@ -209,10 +210,10 @@ function PassCard({ pass, noradId, satName, lat, lon, apiKey, existingAlerts, on
 
 function MetricCard({ label, value, sub }) {
   return (
-    <div style={{ background: "#f5f5f5", borderRadius: 8, padding: "0.85rem 1rem" }}>
-      <div style={{ fontSize: 12, color: "#888", marginBottom: 4 }}>{label}</div>
-      <div style={{ fontSize: 22, fontWeight: 500 }}>{value}</div>
-      {sub && <div style={{ fontSize: 11, color: "#888", marginTop: 2 }}>{sub}</div>}
+    <div style={{ background: "#f9f9f9", border: "0.5px solid #ebebeb", borderRadius: 10, padding: "0.9rem 1rem" }}>
+      <div style={{ fontSize: 11, color: "#aaa", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.05em" }}>{label}</div>
+      <div style={{ fontSize: 24, fontWeight: 500, color: "#111", lineHeight: 1 }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: "#bbb", marginTop: 5 }}>{sub}</div>}
     </div>
   );
 }
@@ -245,20 +246,46 @@ function AuthPage({ onAuth }) {
   };
 
   return (
-    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center",
-      background: "#f9f9f9", fontFamily: "-apple-system, BlinkMacSystemFont, sans-serif" }}>
-      <div style={{ background: "#fff", borderRadius: 16, padding: "2.5rem", width: 380,
-        boxShadow: "0 4px 24px rgba(0,0,0,0.08)" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: "2rem" }}>
-          <div style={{ width: 10, height: 10, borderRadius: "50%", background: "#1D9E75" }} />
-          <span style={{ fontSize: 20, fontWeight: 500 }}>OrbitGuard</span>
-          <span style={{ fontSize: 12, color: "#888" }}>pass quality forecaster</span>
+    <div style={{ minHeight: "100vh", display: "flex", fontFamily: "-apple-system, BlinkMacSystemFont, sans-serif" }}>
+      {/* Left panel — value prop */}
+      <div style={{ flex: 1, background: "#0F6E56", display: "flex", flexDirection: "column",
+        justifyContent: "center", padding: "3rem", minHeight: "100vh" }}
+        className="auth-left-panel">
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: "3rem" }}>
+          <div style={{ width: 10, height: 10, borderRadius: "50%", background: "#5DCAA5" }} />
+          <span style={{ fontSize: 20, fontWeight: 500, color: "#fff" }}>OrbitGuard</span>
         </div>
-        <h2 style={{ fontSize: 18, fontWeight: 500, marginBottom: "0.5rem" }}>
+        <h1 style={{ fontSize: 28, fontWeight: 500, color: "#fff", lineHeight: 1.3, marginBottom: "1rem", maxWidth: 320 }}>
+          Know which passes are worth your time.
+        </h1>
+        <p style={{ fontSize: 15, color: "#9FE1CB", lineHeight: 1.7, maxWidth: 320, marginBottom: "2.5rem" }}>
+          Real-time orbital pass forecasting with NOAA space weather scoring. Built for ground station operators.
+        </p>
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          {[
+            ["48h pass forecast", "Any LEO satellite by NORAD ID"],
+            ["Space weather scoring", "Kp index, F10.7, ionospheric TEC"],
+            ["Email alerts", "Get notified before a good pass"],
+          ].map(([title, sub]) => (
+            <div key={title} style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+              <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#5DCAA5", marginTop: 6, flexShrink: 0 }} />
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 500, color: "#fff" }}>{title}</div>
+                <div style={{ fontSize: 12, color: "#9FE1CB", marginTop: 2 }}>{sub}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+      {/* Right panel — auth form */}
+      <div style={{ width: 420, display: "flex", alignItems: "center", justifyContent: "center",
+        padding: "2.5rem", background: "#fff", minHeight: "100vh" }}>
+        <div style={{ width: "100%", maxWidth: 340 }}>
+        <h2 style={{ fontSize: 22, fontWeight: 500, marginBottom: "0.5rem", color: "#111" }}>
           {mode === "login" ? "Welcome back" : "Create account"}
         </h2>
-        <p style={{ fontSize: 13, color: "#888", marginBottom: "1.5rem" }}>
-          {mode === "login" ? "Sign in to your OrbitGuard account" : "Start forecasting satellite passes"}
+        <p style={{ fontSize: 13, color: "#888", marginBottom: "1.75rem" }}>
+          {mode === "login" ? "Sign in to your OrbitGuard account" : "Start your 14-day free trial"}
         </p>
         {error && <div style={{ background: "#FCEBEB", color: "#501313", borderRadius: 8,
           padding: "0.65rem 0.85rem", fontSize: 13, marginBottom: "1rem" }}>{error}</div>}
@@ -298,6 +325,7 @@ function AuthPage({ onAuth }) {
                 style={{ color: "#1D9E75", cursor: "pointer", fontWeight: 500 }}>Sign in</span>
             </>
           )}
+        </div>
         </div>
       </div>
     </div>
@@ -550,7 +578,7 @@ function Dashboard({ user, apiKey, onLogout }) {
         <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 18, fontWeight: 500 }}>
           <div style={{ width: 10, height: 10, borderRadius: "50%", background: "#1D9E75" }} />
           OrbitGuard
-          <span style={{ fontSize: 12, color: "#888", fontWeight: 400 }}>v2</span>
+          <span style={{ fontSize: 12, color: "#aaa", fontWeight: 400, marginLeft: 2 }}>pass quality forecaster</span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           {wx && (
@@ -585,16 +613,18 @@ function Dashboard({ user, apiKey, onLogout }) {
 
       {/* Weather bar */}
       {wx && (
-        <div style={{ display: "flex", gap: 10, alignItems: "center", padding: "0.75rem 1rem",
-          background: "#f5f5f5", borderRadius: 8, marginBottom: "1rem", flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", padding: "0.75rem 1rem",
+          background: "#f5f5f5", borderRadius: 8, marginBottom: "1rem" }}>
           {[["Kp index", wx.kp_index?.toFixed(1)], ["F10.7", wx.f107_solar_flux?.toFixed(0)],
             ["Alerts", wx.active_alert_count], ["Condition", wx.severity],
             ...(ionex ? [["TEC", `${ionex.vtec_tecu} TECU`], ["Ionosphere", ionex.condition]] : [])
-          ].map(([lbl, val]) => (
-            <div key={lbl} style={{ display: "flex", flexDirection: "column",
-              alignItems: "center", flex: 1, minWidth: 70 }}>
-              <span style={{ fontSize: 15, fontWeight: 500 }}>{val}</span>
-              <span style={{ fontSize: 11, color: "#888", marginTop: 2 }}>{lbl}</span>
+          ].map(([lbl, val], i) => (
+            <div key={lbl} style={{ display: "flex", flex: 1, alignItems: "center" }}>
+              {i > 0 && <div style={{ width: "0.5px", height: 32, background: "#ddd", marginRight: 12, flexShrink: 0 }} />}
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: 1 }}>
+                <span style={{ fontSize: 17, fontWeight: 500, color: "#111" }}>{val}</span>
+                <span style={{ fontSize: 11, color: "#888", marginTop: 2 }}>{lbl}</span>
+              </div>
             </div>
           ))}
         </div>
